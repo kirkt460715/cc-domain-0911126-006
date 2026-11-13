@@ -122,6 +122,22 @@ def parser():
     cases.add_argument('--database', required=True)
     cases.add_argument('--operation', choices=['open', 'resolve', 'get', 'pending'], required=True)
     cases.add_argument('--body', required=True)
+    forecast_gen = commands.add_parser('forecast-gen')
+    forecast_gen.add_argument('--output', required=True)
+    forecast_gen.add_argument('--seed', type=int, default=20261113)
+    forecast_run = commands.add_parser('forecast-run')
+    forecast_run.add_argument('--input', required=True)
+    forecast_run.add_argument('--effective-at', required=True)
+    forecast_run.add_argument('--knowledge-at', required=True)
+    forecast_run.add_argument('--package-directory')
+    forecast_run.add_argument('--coverage', type=float, default=0.9)
+    forecast_predict = commands.add_parser('forecast-predict')
+    forecast_predict.add_argument('--package-directory', required=True)
+    forecast_predict.add_argument('--features', required=True)
+    forecast_predict.add_argument('--model', choices=['ridge_log1p', 'median_baseline'],
+                                  default='ridge_log1p')
+    forecast_verify = commands.add_parser('forecast-verify')
+    forecast_verify.add_argument('--package-directory', required=True)
     return root
 
 
@@ -148,6 +164,45 @@ def execute(args):
         return recovery.restore(args.input, args.output, args.sha256)
     if args.command == 'verify-bundle':
         return bundle.verify(args.directory)
+    if args.command == 'forecast-gen':
+        from forecasting.synth import write_fixture
+        _, meta = write_fixture(args.output, seed=args.seed)
+        return {'generated': args.output, 'meta': meta}
+    if args.command == 'forecast-run':
+        from forecasting.study import run
+        from forecasting.training import save_package
+        dataset = Dataset(load(args.input))
+        study = run(dataset, args.effective_at, args.knowledge_at,
+                    coverage=args.coverage)
+        saved = None
+        if args.package_directory:
+            saved = save_package(study['package'], args.package_directory)
+        return {
+            'exclusion_reason_counts': study['point_in_time']['reason_counts'],
+            'hyperparameter_selection': study['selection'],
+            'split_purge': {
+                'calibration': study['split']['purge_calibration'],
+                'test_vs_train': study['split']['purge_test_vs_train'],
+                'test_vs_calibration': study['split']['purge_test_vs_calibration'],
+            },
+            'evaluation_summary': {
+                name: {
+                    'calibration_overall': body['calibration']['overall'],
+                    'test_overall': body['test']['overall'],
+                    'test_new_clients': body['test']['new_clients'],
+                    'upper_bound': body['upper_bound'],
+                } for name, body in study['evaluation'].items()
+            },
+            'package': saved or study['package']['package_digest'],
+        }
+    if args.command == 'forecast-predict':
+        from forecasting.training import load_package, predict_new_request
+        package = load_package(args.package_directory)
+        return predict_new_request(package, load(args.features), args.model)
+    if args.command == 'forecast-verify':
+        from forecasting.training import load_package
+        package = load_package(args.package_directory)
+        return {'verified': True, 'package_digest': package['package_digest']}
     with Ledger(args.database) as ledger:
         if args.command == 'stage':
             from dispatch_log.staging import Staging
